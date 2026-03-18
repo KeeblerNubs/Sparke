@@ -43,6 +43,8 @@ To build the image without starting the container, run:
 While the bot is running, the following prefix commands are available inside a
 Discord guild (server) where the bot is present:
 
+* `!dashboard` / `/dashboard` – Open an interactive dashboard with popup
+  menus for **Admin Control** and **User Control**.
 * `!createinvite @Role [max_uses] [max_age]` – Create a unique invite for the
   current channel and associate it with a role.
 * `!listinvites` – List the currently tracked invite-to-role mappings.

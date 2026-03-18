@@ -14,6 +14,7 @@ import os
 from typing import Dict
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 # Configure basic logging so container logs surface useful information
@@ -33,10 +34,121 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 invite_role_map: Dict[str, int] = {}
 # Dictionary to track uses of invites per guild {guild_id: {invite_code: uses}}
 invite_uses: Dict[int, Dict[str, int]] = {}
+commands_synced = False
+
+
+def build_invite_mapping_text(guild: discord.Guild) -> str:
+    """Render all tracked invite-role mappings for a guild as user-friendly text."""
+    if not invite_role_map:
+        return "No invite-role mappings set up yet."
+
+    lines = []
+    for code, role_id in invite_role_map.items():
+        role = guild.get_role(role_id)
+        role_name = role.name if role else "Deleted Role"
+        lines.append(f"Invite `{code}` → Role `{role_name}`")
+    return "\n".join(lines)
+
+
+class DashboardView(discord.ui.View):
+    """Top-level dashboard with separate admin and user controls."""
+
+    def __init__(self) -> None:
+        super().__init__(timeout=180)
+
+    @discord.ui.button(label="Admin Control", style=discord.ButtonStyle.danger, emoji="🛠️")
+    async def admin_control(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "This menu can only be used inside a server.", ephemeral=True
+            )
+            return
+
+        member = interaction.user
+        if not isinstance(member, discord.Member) or not member.guild_permissions.manage_guild:
+            await interaction.response.send_message(
+                "You need the **Manage Server** permission to use admin controls.",
+                ephemeral=True,
+            )
+            return
+
+        embed = discord.Embed(
+            title="🛠️ Admin Dashboard",
+            description="Use these controls to manage invite-role mappings.",
+            color=discord.Color.red(),
+        )
+        embed.add_field(name="Tracked mappings", value=build_invite_mapping_text(interaction.guild), inline=False)
+        await interaction.response.send_message(embed=embed, view=AdminControlView(), ephemeral=True)
+
+    @discord.ui.button(label="User Control", style=discord.ButtonStyle.primary, emoji="👤")
+    async def user_control(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "This menu can only be used inside a server.", ephemeral=True
+            )
+            return
+
+        embed = discord.Embed(
+            title="👤 User Dashboard",
+            description="Quick actions and help for server members.",
+            color=discord.Color.blurple(),
+        )
+        embed.add_field(name="Available tracked invites", value=build_invite_mapping_text(interaction.guild), inline=False)
+        embed.add_field(
+            name="Need a custom invite?",
+            value="Contact an admin and ask them to run `!createinvite @Role [max_uses] [max_age]`.",
+            inline=False,
+        )
+        await interaction.response.send_message(embed=embed, view=UserControlView(), ephemeral=True)
+
+
+class AdminControlView(discord.ui.View):
+    """Admin-only popup actions."""
+
+    def __init__(self) -> None:
+        super().__init__(timeout=180)
+
+    @discord.ui.button(label="Refresh Mappings", style=discord.ButtonStyle.secondary, emoji="🔄")
+    async def refresh_mappings(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message("Server context not found.", ephemeral=True)
+            return
+
+        await interaction.response.send_message(build_invite_mapping_text(interaction.guild), ephemeral=True)
+
+    @discord.ui.button(label="Clear Mappings", style=discord.ButtonStyle.danger, emoji="🧹")
+    async def clear_mappings(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        member = interaction.user
+        if not isinstance(member, discord.Member) or not member.guild_permissions.manage_guild:
+            await interaction.response.send_message(
+                "You need the **Manage Server** permission to clear mappings.",
+                ephemeral=True,
+            )
+            return
+
+        invite_role_map.clear()
+        logger.info("Invite-role mappings cleared using dashboard by %s", member)
+        await interaction.response.send_message("All invite-role mappings were cleared.", ephemeral=True)
+
+
+class UserControlView(discord.ui.View):
+    """User-focused popup actions."""
+
+    def __init__(self) -> None:
+        super().__init__(timeout=180)
+
+    @discord.ui.button(label="How roles are assigned", style=discord.ButtonStyle.secondary, emoji="ℹ️")
+    async def role_help(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await interaction.response.send_message(
+            "When someone joins through a tracked invite link, the mapped role is applied automatically.",
+            ephemeral=True,
+        )
 
 
 @bot.event
 async def on_ready() -> None:
+    global commands_synced
+
     logger.info("Logged in as %s", bot.user)
     # Initialize invite uses
     for guild in bot.guilds:
@@ -47,6 +159,35 @@ async def on_ready() -> None:
             continue
         invite_uses[guild.id] = {invite.code: invite.uses for invite in invites}
     logger.info("Cached invite usage for %d guild(s)", len(invite_uses))
+
+    if not commands_synced:
+        synced_commands = await bot.tree.sync()
+        commands_synced = True
+        logger.info("Synced %d application command(s)", len(synced_commands))
+
+
+@bot.command(name="dashboard")
+@commands.guild_only()
+async def dashboard_prefix(ctx: commands.Context) -> None:
+    """Open an interactive dashboard with admin and user popup controls."""
+    embed = discord.Embed(
+        title="📊 Server Dashboard",
+        description="Use the buttons below to open the admin or user popup menus.",
+        color=discord.Color.green(),
+    )
+    await ctx.send(embed=embed, view=DashboardView())
+
+
+@bot.tree.command(name="dashboard", description="Open a popup dashboard for admin and user controls")
+@app_commands.guild_only()
+async def dashboard_slash(interaction: discord.Interaction) -> None:
+    """Slash-command version of the interactive dashboard."""
+    embed = discord.Embed(
+        title="📊 Server Dashboard",
+        description="Use the buttons below to open the admin or user popup menus.",
+        color=discord.Color.green(),
+    )
+    await interaction.response.send_message(embed=embed, view=DashboardView(), ephemeral=True)
 
 
 @bot.command(name="createinvite")
@@ -67,16 +208,7 @@ async def create_invite(ctx: commands.Context, role: discord.Role, max_uses: int
 @commands.guild_only()
 async def list_invites(ctx: commands.Context) -> None:
     """List all active invite-to-role mappings."""
-    if not invite_role_map:
-        await ctx.send("No invite-role mappings set up yet.")
-        return
-
-    lines = []
-    for code, role_id in invite_role_map.items():
-        role = ctx.guild.get_role(role_id)
-        role_name = role.name if role else "Deleted Role"
-        lines.append(f"Invite `{code}` → Role `{role_name}`")
-    await ctx.send("\n".join(lines))
+    await ctx.send(build_invite_mapping_text(ctx.guild))
 
 
 @bot.command(name="clearinvites")
